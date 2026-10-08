@@ -29,10 +29,28 @@
     image-rendering: crisp-edges;
     display: block;
   }
+  #stage { position: relative; display: inline-block; }
+  #aiBtn {
+    position: absolute;
+    top: 8px; right: 8px;
+    z-index: 10;
+    font: bold 16px/1.5 "Courier New", monospace;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+    border: 2px solid #fff;
+    border-radius: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  }
+  #aiBtn.on { background: rgba(46, 139, 87, 0.85); }
 </style>
 </head>
 <body>
+<div id="stage">
 <canvas id="game"></canvas>
+<button id="aiBtn" type="button">AI 演示: 关</button>
+</div>
 <script>
 "use strict";
 
@@ -68,7 +86,7 @@ const W = 288, H = 512;
 const GROUND_H = 112, GROUND_Y = H - GROUND_H;      // 地面顶边 y=400
 const PIPE_W = 52, PIPE_GAP = 100, PIPE_SPACING = 170;
 const SPEED = 2;                                     // 管道/地面滚动速度 px/帧
-const GRAVITY = 0.5, FLAP = -9, MAX_FALL = 11;       // 原版手感参数
+const GRAVITY = 0.45, FLAP = -7, MAX_FALL = 10;      // 单次起跳约 54px, 适配 100px 间隙
 const BIRD_X = 52, BIRD_W = 34, BIRD_H = 24;
 const HIT_INSET_X = 4, HIT_INSET_Y = 3;              // 判定框比贴图略小, 同原版宽容度
 
@@ -122,18 +140,58 @@ function resetGame() {
 }
 resetBird();
 
+/* ---------- 玩家操作记录 (供 AI 设计): 每次按键瞬间记录局面, 局末上传服务器存文件 ---------- */
+let opRec = null;                     // 本局操作记录 {ts, startFrame, flaps: []}
+
+// 按键瞬间的局面快照: 鸟状态 + 下一根柱子(距离/缺口) + 柱子间距 (速度取按键前一刻)
+function snapshot() {
+  const ahead = pipes.filter(p => p.x + PIPE_W > BIRD_X + BIRD_W).sort((a, b) => a.x - b.x);
+  const p1 = ahead[0], p2 = ahead[1];
+  const gapCenter = p1 ? p1.gapY + PIPE_GAP / 2 : 220;
+  return {
+    f: frame,                                            // 帧号 (60fps)
+    by: Math.round(bird.y * 10) / 10,                    // 鸟顶边 y
+    bv: Math.round(bird.v * 100) / 100,                  // 按键前速度 (负=上升)
+    dx: p1 ? Math.round(p1.x - (BIRD_X + BIRD_W)) : null,// 鸟前端到下一柱左缘的水平距离
+    gapY: p1 ? Math.round(p1.gapY * 10) / 10 : null,     // 下一柱缺口上沿 y
+    gapH: PIPE_GAP,                                      // 缺口高度 (本局固定)
+    dy: Math.round((bird.y + BIRD_H / 2 - gapCenter) * 10) / 10, // 鸟中心-缺口中心 (正=偏低)
+    spacing: p2 ? Math.round(p2.x - p1.x) : PIPE_SPACING,// 与再下一柱的水平间距
+    score: score
+  };
+}
+
+function uploadRecording(data) {
+  try {
+    fetch("/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data)
+    }).catch(() => saveLocalRun(data));
+  } catch (e) { saveLocalRun(data); }
+}
+function saveLocalRun(data) {          // 服务器不可用时的兜底: 存 localStorage (保留最近 5 局)
+  try {
+    const runs = JSON.parse(localStorage.getItem("flappy_runs") || "[]");
+    runs.push(data);
+    localStorage.setItem("flappy_runs", JSON.stringify(runs.slice(-5)));
+  } catch (e) {}
+}
+
 function spawnPipe() {
   const gapY = 60 + Math.random() * (GROUND_Y - PIPE_GAP - 120);
   pipes.push({ x: W, gapY: gapY, scored: false });
 }
 
 function flap() {
+  if (opRec && !aiOn) opRec.flaps.push(snapshot());   // 玩家按键瞬间: 记录按键前的局面
   bird.v = FLAP;
   play("wing");
 }
 
 function startPlay() {
   state = "play";
+  opRec = { ts: new Date().toISOString(), startFrame: frame, flaps: [] };
   pipes = [];
   spawnPipe();
   pipes[0].x = W + 40;                 // 首根管道稍远一点, 留出反应时间
@@ -141,14 +199,41 @@ function startPlay() {
   play("swoosh", 0.4);
 }
 
-function die() {
+function die(cause, hitPipe) {
   state = "dying";
   play("hit", 0.7); play("swoosh", 0.4);
   flash = 1;
+  if (opRec) {                       // 局末: 补上死亡局面并上传整局操作记录
+    opRec.score = score;
+    opRec.best = best;
+    opRec.frames = frame - opRec.startFrame;
+    opRec.death = snapshot();
+    opRec.death.cause = cause || "unknown";
+    if (hitPipe)                     // 撞上的那根柱子的缺口中心偏差 (snapshot 里的 dy 可能已是下一根)
+      opRec.death.dyHit = Math.round((bird.y + BIRD_H / 2 - (hitPipe.gapY + PIPE_GAP / 2)) * 10) / 10;
+    uploadRecording(opRec);
+    opRec = null;
+  }
+  if (aiOn && score > aiBest) {        // AI 自打分: 记录自己的历史最高分
+    aiBest = score;
+    localStorage.setItem("flappy_ai_best", aiBest);
+  }
+}
+
+/* ---------- 局面特征: 鸟相对下一根管道间隙中心的高度差 dy / 速度 v / 管道距离 dx ---------- */
+function situation() {
+  const ahead = pipes.find(p => p.x + PIPE_W > BIRD_X + BIRD_W);
+  let dy = ahead ? bird.y - (ahead.gapY + PIPE_GAP / 2 - BIRD_H / 2) : bird.y - 220;
+  let v = bird.v;
+  const dx = ahead ? Math.min(340, ahead.x - BIRD_X) : 340;
+  dy = Math.max(-160, Math.min(110, dy));
+  v = Math.max(-7, Math.min(7, v));
+  return [dy, v, dx];
 }
 
 /* ---------- 输入 ---------- */
 function onAction() {
+  if (aiOn) return;                  // AI 回放期间忽略手动操作
   if (state === "ready") { startPlay(); }
   else if (state === "play") { flap(); }
   else if (state === "over" && frame - overAt > 40) { resetGame(); play("swoosh", 0.4); }
@@ -163,14 +248,74 @@ addEventListener("keydown", e => {
     birdColor = order[(order.indexOf(birdColor) + 1) % 3];
     localStorage.setItem("flappy_color", birdColor);
     play("swoosh", 0.4);
+  } else if (e.code === "KeyA") {
+    setAI(!aiOn);
   }
 });
 document.addEventListener("visibilitychange", () => { last = null; });
+
+/* ---------- AI 演示 (按钮或 A 键开关): 策略提炼自玩家实玩录制 (recordings/*.json) ----------
+   以下每个参数都来自玩家按键统计, 不是凭空设计:
+   - 巡航: 玩家只在处于下落状态时按键, 按键瞬间速度中位数 +6.5 → v>=6.5 才拍 (间隔自然约 30 帧)
+   - 禁拍区: 玩家从不在鸟中心高于缺口中心 35px 时按键 (录制最小 dy=-34.3) → dy<-35 不拍
+   - 爬升: 玩家低于缺口中心 55px 以上时以 ~13 帧间隔连拍爬升 → dy>55 进入爬升连拍
+   - 节奏: 玩家两次按键最短间隔 10 帧 → 全局冷却 10 帧, 绝不逐帧按键
+   AI 自己玩、自打分 (aiBest 持久化), 死后自动重开循环演示。 */
+let aiOn = false;
+let aiBest = +(localStorage.getItem("flappy_ai_best") || 0);
+const aiBtn = document.getElementById("aiBtn");
+
+function setAI(on) {
+  aiOn = on;
+  aiBtn.textContent = "AI 演示: " + (on ? "开" : "关");
+  aiBtn.classList.toggle("on", on);
+  if (on && state === "over") resetGame();
+}
+aiBtn.addEventListener("click", () => setAI(!aiOn));
+
+let aiLastFlap = -99;                    // 上次 AI 拍翅帧号 (强制间隔, 模仿人类点击节奏)
+
+function startAIPlay() {
+  state = "play";
+  aiLastFlap = frame;
+  pipes = [];
+  spawnPipe();
+  pipes[0].x = W + 40;
+  flap();                                         // 与人类开局操作一致
+  play("swoosh", 0.4);
+}
+
+// 玩家录制提炼出的操作策略: 爬升连拍 / 近管安全补拍 / 远端高度维持
+// 关键几何: 单次拍翅固定上升 54px, 判定安全区 |dy|<=41 → 管内只有 dy>=15 时拍翅才不会顶到上沿
+function policyFlap() {
+  const s = situation();
+  const dy = s[0], v = s[1], dx = s[2];
+  const since = frame - aiLastFlap;
+  if (dy > 55) {                                  // 明显低于缺口中心: 玩家式连拍爬升 (间隔 13 帧)
+    if (since >= 13) { flap(); aiLastFlap = frame; }
+    return;
+  }
+  if (dx > 130) {                                 // 远端: 维持高度 (v>=7 时净位移为零, 高度稳定)
+    if (dy > -35 && v >= 7 && since >= 10) { flap(); aiLastFlap = frame; }
+    return;
+  }
+  if (dy >= 15 && v > 0 && since >= 10) {         // 接近/穿过管道: 只在足够低处补拍, 上升 54px 仍安全
+    flap();
+    aiLastFlap = frame;
+  }
+}
+
+function aiStep() {
+  if (state === "ready") { startAIPlay(); return; }
+  if (state === "over" && frame - overAt > 60) resetGame();   // 循环演示
+  if (state === "play") policyFlap();
+}
 
 /* ---------- 更新 ---------- */
 function update() {
   frame++;
   if (flash > 0) flash = Math.max(0, flash - 0.08);
+  if (aiOn) aiStep();
 
   if (state === "ready") {
     bird.y = 272 + Math.sin(frame * 0.12) * 7;
@@ -206,10 +351,10 @@ function update() {
     // 碰撞: 地面 + 管道 (判定框内缩, 同原版)
     const bx = BIRD_X + HIT_INSET_X, by = bird.y + HIT_INSET_Y;
     const bw = BIRD_W - HIT_INSET_X * 2, bh = BIRD_H - HIT_INSET_Y * 2;
-    if (by + bh >= GROUND_Y) { bird.y = GROUND_Y - BIRD_H; die(); return; }
+    if (by + bh >= GROUND_Y) { bird.y = GROUND_Y - BIRD_H; die("ground"); return; }
     for (const p of pipes) {
       if (bx + bw > p.x && bx < p.x + PIPE_W &&
-          (by < p.gapY || by + bh > p.gapY + PIPE_GAP)) { die(); return; }
+          (by < p.gapY || by + bh > p.gapY + PIPE_GAP)) { die("pipe", p); return; }
     }
     return;
   }
@@ -306,6 +451,9 @@ function draw() {
 
   // 分数
   if (state === "play" || state === "dying") drawDigits(String(score), W / 2, 44);
+
+  // AI 自打分
+  if (aiOn) outlinedText("AI 最佳: " + aiBest, 8, 22, 12, "left");
 
   // 准备界面提示
   if (state === "ready" && Math.floor(frame / 30) % 2 === 0)
