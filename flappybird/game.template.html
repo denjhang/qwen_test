@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>像素鸟 Flappy Bird</title>
+<!--
+  素材来源: samuelcust/flappy-bird-assets (原版 Flappy Bird 素材, 见 assets/LICENSE)
+  构建方式: node build.js 将 assets/ 内嵌为 base64, 生成单文件 flappy.html
+-->
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #2b2b2b;
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    display: block;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+"use strict";
+
+/* ---------- 内嵌素材 (build.js 注入 base64) ---------- */
+const IMG_SRC = {
+  bg_day:    "@@img_background_day@@",
+  bg_night:  "@@img_background_night@@",
+  base:      "@@img_base@@",
+  pipe:      "@@img_pipe_green@@",
+  pipe_red:  "@@img_pipe_red@@",
+  msg:       "@@img_message@@",
+  gameover:  "@@img_gameover@@",
+  digits: {
+    0:"@@img_0@@",1:"@@img_1@@",2:"@@img_2@@",3:"@@img_3@@",4:"@@img_4@@",
+    5:"@@img_5@@",6:"@@img_6@@",7:"@@img_7@@",8:"@@img_8@@",9:"@@img_9@@"
+  },
+  birds: {
+    yellow: { up:"@@img_yellowbird_upflap@@", mid:"@@img_yellowbird_midflap@@", down:"@@img_yellowbird_downflap@@" },
+    blue:   { up:"@@img_bluebird_upflap@@",   mid:"@@img_bluebird_midflap@@",   down:"@@img_bluebird_downflap@@" },
+    red:    { up:"@@img_redbird_upflap@@",    mid:"@@img_redbird_midflap@@",    down:"@@img_redbird_downflap@@" }
+  }
+};
+const SND_SRC = {
+  wing:   "@@snd_wing@@",
+  point:  "@@snd_point@@",
+  hit:    "@@snd_hit@@",
+  die:    "@@snd_die@@",
+  swoosh: "@@snd_swoosh@@"
+};
+
+/* ---------- 常量: 原版 288x512 逻辑分辨率, 60fps 步进 ---------- */
+const W = 288, H = 512;
+const GROUND_H = 112, GROUND_Y = H - GROUND_H;      // 地面顶边 y=400
+const PIPE_W = 52, PIPE_GAP = 100, PIPE_SPACING = 170;
+const SPEED = 2;                                     // 管道/地面滚动速度 px/帧
+const GRAVITY = 0.5, FLAP = -9, MAX_FALL = 11;       // 原版手感参数
+const BIRD_X = 52, BIRD_W = 34, BIRD_H = 24;
+const HIT_INSET_X = 4, HIT_INSET_Y = 3;              // 判定框比贴图略小, 同原版宽容度
+
+/* ---------- 素材加载 ---------- */
+function loadImg(src) { const i = new Image(); i.src = src; return i; }
+const IMG = {
+  bg_day: loadImg(IMG_SRC.bg_day), bg_night: loadImg(IMG_SRC.bg_night),
+  base: loadImg(IMG_SRC.base), pipe: loadImg(IMG_SRC.pipe), pipe_red: loadImg(IMG_SRC.pipe_red),
+  msg: loadImg(IMG_SRC.msg), gameover: loadImg(IMG_SRC.gameover),
+  digits: {}, birds: {}
+};
+for (const d in IMG_SRC.digits) IMG.digits[d] = loadImg(IMG_SRC.digits[d]);
+for (const c in IMG_SRC.birds) IMG.birds[c] = {
+  up: loadImg(IMG_SRC.birds[c].up), mid: loadImg(IMG_SRC.birds[c].mid), down: loadImg(IMG_SRC.birds[c].down)
+};
+const SND = {};
+for (const k in SND_SRC) SND[k] = new Audio(SND_SRC[k]);
+function play(name, vol) {
+  const s = SND[name].cloneNode();
+  s.volume = vol == null ? 0.55 : vol;
+  s.play().catch(() => {});
+}
+
+/* ---------- 画布与自适应缩放 ---------- */
+const cvs = document.getElementById("game");
+const ctx = cvs.getContext("2d");
+cvs.width = W; cvs.height = H;
+ctx.imageSmoothingEnabled = false;
+function fit() {
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  cvs.style.width = Math.round(W * s) + "px";
+  cvs.style.height = Math.round(H * s) + "px";
+}
+addEventListener("resize", fit); fit();
+
+/* ---------- 游戏状态 ---------- */
+let state = "ready";          // ready | play | dying | over
+let frame = 0, score = 0, pipes = [], groundX = 0;
+let night = false, pipesSinceSwitch = 0, flash = 0, overAt = 0;
+let best = +(localStorage.getItem("flappy_best") || 0);
+let birdColor = localStorage.getItem("flappy_color") || "yellow";
+if (!IMG.birds[birdColor]) birdColor = "yellow";
+const bird = { y: 0, v: 0, angle: 0, wing: 0 };
+
+function resetBird() {
+  bird.y = 272; bird.v = 0; bird.angle = 0; bird.wing = 0;
+}
+function resetGame() {
+  state = "ready"; score = 0; pipes = []; flash = 0;
+  resetBird();
+}
+resetBird();
+
+function spawnPipe() {
+  const gapY = 60 + Math.random() * (GROUND_Y - PIPE_GAP - 120);
+  pipes.push({ x: W, gapY: gapY, scored: false });
+}
+
+function flap() {
+  bird.v = FLAP;
+  play("wing");
+}
+
+function startPlay() {
+  state = "play";
+  pipes = [];
+  spawnPipe();
+  pipes[0].x = W + 40;                 // 首根管道稍远一点, 留出反应时间
+  flap();
+  play("swoosh", 0.4);
+}
+
+function die() {
+  state = "dying";
+  play("hit", 0.7); play("swoosh", 0.4);
+  flash = 1;
+}
+
+/* ---------- 输入 ---------- */
+function onAction() {
+  if (state === "ready") { startPlay(); }
+  else if (state === "play") { flap(); }
+  else if (state === "over" && frame - overAt > 40) { resetGame(); play("swoosh", 0.4); }
+}
+cvs.addEventListener("pointerdown", e => { e.preventDefault(); onAction(); });
+addEventListener("keydown", e => {
+  if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
+    e.preventDefault();
+    if (!e.repeat) onAction();
+  } else if (e.code === "KeyC" && state === "ready") {
+    const order = ["yellow", "blue", "red"];
+    birdColor = order[(order.indexOf(birdColor) + 1) % 3];
+    localStorage.setItem("flappy_color", birdColor);
+    play("swoosh", 0.4);
+  }
+});
+document.addEventListener("visibilitychange", () => { last = null; });
+
+/* ---------- 更新 ---------- */
+function update() {
+  frame++;
+  if (flash > 0) flash = Math.max(0, flash - 0.08);
+
+  if (state === "ready") {
+    bird.y = 272 + Math.sin(frame * 0.12) * 7;
+    bird.wing++;
+    groundX = (groundX - SPEED) % IMG.base.width;
+    return;
+  }
+
+  if (state === "play") {
+    // 鸟物理
+    bird.v = Math.min(bird.v + GRAVITY, MAX_FALL);
+    bird.y += bird.v;
+    if (bird.y < 0) { bird.y = 0; bird.v = 0; }
+    bird.angle = bird.v < 0 ? -0.42 : Math.min((bird.v / MAX_FALL) * 1.57, 1.57);
+    bird.wing++;
+
+    // 管道滚动与生成
+    for (const p of pipes) p.x -= SPEED;
+    if (pipes.length && pipes[pipes.length - 1].x <= W - PIPE_SPACING) spawnPipe();
+    pipes = pipes.filter(p => p.x + PIPE_W > 0);
+    groundX = (groundX - SPEED) % IMG.base.width;
+
+    // 计分
+    for (const p of pipes) {
+      if (!p.scored && p.x + PIPE_W < BIRD_X) {
+        p.scored = true; score++;
+        play("point"); play("swoosh", 0.3);
+        pipesSinceSwitch++;
+        if (pipesSinceSwitch >= 4) { pipesSinceSwitch = 0; night = !night; }
+      }
+    }
+
+    // 碰撞: 地面 + 管道 (判定框内缩, 同原版)
+    const bx = BIRD_X + HIT_INSET_X, by = bird.y + HIT_INSET_Y;
+    const bw = BIRD_W - HIT_INSET_X * 2, bh = BIRD_H - HIT_INSET_Y * 2;
+    if (by + bh >= GROUND_Y) { bird.y = GROUND_Y - BIRD_H; die(); return; }
+    for (const p of pipes) {
+      if (bx + bw > p.x && bx < p.x + PIPE_W &&
+          (by < p.gapY || by + bh > p.gapY + PIPE_GAP)) { die(); return; }
+    }
+    return;
+  }
+
+  if (state === "dying") {
+    bird.v = Math.min(bird.v + GRAVITY, MAX_FALL);
+    bird.y += bird.v;
+    bird.angle = Math.min(bird.angle + 0.12, 1.57);
+    if (bird.y + BIRD_H >= GROUND_Y) {
+      bird.y = GROUND_Y - BIRD_H;
+      state = "over"; overAt = frame;
+      play("die", 0.7);
+      if (score > best) { best = score; localStorage.setItem("flappy_best", best); }
+    }
+    return;
+  }
+  // state === "over": 静止等待重开
+}
+
+/* ---------- 绘制 ---------- */
+function drawDigits(str, cx, y, scale) {
+  scale = scale || 1;
+  let total = 0;
+  for (const ch of str) total += IMG.digits[ch].width * scale + 2;
+  total -= 2;
+  let x = Math.round(cx - total / 2);
+  for (const ch of str) {
+    const im = IMG.digits[ch];
+    ctx.drawImage(im, x, y, im.width * scale, im.height * scale);
+    x += im.width * scale + 2;
+  }
+}
+function drawDigitsRight(str, right, y, scale) {
+  scale = scale || 1;
+  let total = 0;
+  for (const ch of str) total += IMG.digits[ch].width * scale + 2;
+  total -= 2;
+  let x = right - total;
+  for (const ch of str) {
+    const im = IMG.digits[ch];
+    ctx.drawImage(im, x, y, im.width * scale, im.height * scale);
+    x += im.width * scale + 2;
+  }
+}
+function outlinedText(txt, x, y, size, align) {
+  ctx.font = "bold " + size + "px 'Arial Black', Arial, sans-serif";
+  ctx.textAlign = align || "center";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = Math.max(3, size / 4);
+  ctx.strokeStyle = "#553a17";
+  ctx.strokeText(txt, x, y);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(txt, x, y);
+}
+function medalColor(s) {
+  if (s >= 40) return ["#c0c0c0", "#f5f5f5", "#8a8a8a"]; // 白金
+  if (s >= 30) return ["#e8c14a", "#fff3b0", "#a8842a"]; // 金
+  if (s >= 20) return ["#c9d4dd", "#f2f6f9", "#8b98a5"]; // 银
+  if (s >= 10) return ["#cd7f32", "#eab37a", "#8f5520"]; // 铜
+  return null;
+}
+
+function draw() {
+  // 背景
+  ctx.drawImage(night ? IMG.bg_night : IMG.bg_day, 0, 0);
+
+  // 管道
+  for (const p of pipes) {
+    ctx.drawImage(IMG.pipe, p.x, p.gapY + PIPE_GAP);                            // 下管
+    ctx.save();                                                                  // 上管(翻转)
+    ctx.translate(p.x, p.gapY);
+    ctx.scale(1, -1);
+    ctx.drawImage(IMG.pipe, 0, 0);                                               // 翻转后占 gapY-320..gapY
+    ctx.restore();
+  }
+
+  // 地面
+  for (let x = groundX; x < W; x += IMG.base.width)
+    ctx.drawImage(IMG.base, Math.round(x), GROUND_Y);
+
+  // 准备界面海报先画, 鸟浮在海报之上 (同原版)
+  if (state === "ready")
+    ctx.drawImage(IMG.msg, Math.round((W - IMG.msg.width) / 2), 120);
+
+  // 鸟
+  const bset = IMG.birds[birdColor];
+  const cycle = ["mid", "up", "mid", "down"];
+  const wing = state === "dying" ? bset.down : bset[cycle[Math.floor(bird.wing / 7) % 4]];
+  ctx.save();
+  ctx.translate(BIRD_X + BIRD_W / 2, bird.y + BIRD_H / 2);
+  ctx.rotate(bird.angle);
+  ctx.drawImage(wing, -BIRD_W / 2, -BIRD_H / 2);
+  ctx.restore();
+
+  // 分数
+  if (state === "play" || state === "dying") drawDigits(String(score), W / 2, 44);
+
+  // 准备界面提示
+  if (state === "ready" && Math.floor(frame / 30) % 2 === 0)
+    outlinedText("点击 / 空格 开始", W / 2, 420, 16);
+
+  // 结算面板
+  if (state === "over") {
+    ctx.drawImage(IMG.gameover, Math.round((W - IMG.gameover.width) / 2), 88);
+    const px = 32, py = 148, pw = 224, ph = 150;
+    ctx.fillStyle = "#dedeb6";
+    ctx.fillRect(px, py, pw, ph);
+    ctx.strokeStyle = "#555555"; ctx.lineWidth = 2;
+    ctx.strokeRect(px + 1, py + 1, pw - 2, ph - 2);
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1;
+    ctx.strokeRect(px + 4, py + 4, pw - 8, ph - 8);
+
+    outlinedText("SCORE", px + pw - 16, py + 26, 14, "right");
+    drawDigitsRight(String(score), px + pw - 16, py + 34, 0.72);
+    outlinedText("BEST", px + pw - 16, py + 86, 14, "right");
+    drawDigitsRight(String(best), px + pw - 16, py + 94, 0.72);
+
+    const mc = medalColor(score);
+    const mx = px + 46, my = py + 74, mr = 26;
+    if (mc) {
+      const g = ctx.createRadialGradient(mx - 8, my - 8, 4, mx, my, mr);
+      g.addColorStop(0, mc[1]); g.addColorStop(0.55, mc[0]); g.addColorStop(1, mc[2]);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(mx, my, mr, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = mc[2]; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
+      ctx.beginPath(); ctx.arc(mx - 9, my - 9, 6, 0, Math.PI * 2); ctx.fill();
+    } else {
+      ctx.fillStyle = "#b9b9a2";
+      ctx.beginPath(); ctx.arc(mx, my, mr, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#8f8f7a"; ctx.lineWidth = 2; ctx.stroke();
+    }
+
+    if (frame - overAt > 40 && Math.floor(frame / 30) % 2 === 0)
+      outlinedText("点击任意位置重新开始", W / 2, 340, 15);
+  }
+
+  // 死亡白闪
+  if (flash > 0) {
+    ctx.fillStyle = "rgba(255,255,255," + flash.toFixed(2) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+/* ---------- 主循环: 固定 60fps 步进 ---------- */
+let last = null, acc = 0;
+const STEP = 1000 / 60;
+function loop(t) {
+  requestAnimationFrame(loop);
+  if (last == null) last = t;
+  acc += Math.min(t - last, 250);
+  last = t;
+  while (acc >= STEP) { update(); acc -= STEP; }
+  draw();
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
