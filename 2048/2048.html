@@ -192,6 +192,8 @@
   let grid;          // grid[r][c] = tile 对象或 null
   let score, best, won, over;
   let tileId = 0;
+  let animating = false; // 合并动画播放中（130ms）：期间 mergedThisTurn 未复位、新方块未生成
+  let pending = null;    // 动画期间收到的下一步按键（快速连按时排队，防止合并被吞）
 
   // ---------- 布局 ----------
   function posOf(r, c) {
@@ -284,7 +286,7 @@
   function newGame() {
     board.querySelectorAll('.tile').forEach(el => el.remove());
     grid = Array.from({ length: SIZE }, () => Array(SIZE).fill(null));
-    score = 0; won = false; over = false;
+    score = 0; won = false; over = false; pending = null; animating = false;
     overlay.classList.remove('show', 'win');
     updateScore(0);
     addRandomTile();
@@ -328,6 +330,9 @@
 
   function move(dir) {
     if (over) return;
+    // 上一次移动还有合并动画在播：本步排队，等动画收尾（mergedThisTurn 复位、新方块生成）
+    // 之后再执行。否则连按时合并标记未清，本应合并的方块会直接撞停。
+    if (animating) { pending = dir; return; }
     const [dr, dc] = DELTA[dir];
     const rows = [...Array(SIZE).keys()];
     const cols = [...Array(SIZE).keys()];
@@ -363,7 +368,7 @@
         gain += newVal;
         place(tile.el, nr, nc);
         mergedPairs.push([nr, nc, newVal, tile, target]);
-        grid[nr][nc] = { id: ++tileId, val: newVal, el: null, mergedThisTurn: true };
+        grid[nr][nc] = { id: ++tileId, val: newVal, el: tile.el, mergedThisTurn: true };
         if (newVal === 2048 && !won) won = true;
       } else {
         grid[nr][nc] = tile;
@@ -380,6 +385,7 @@
     if (mergedPairs.length) playMerge(mergedPairs[mergedPairs.length - 1][2]);
 
     // 合并动画：旧方块滑到位后移除，生成新方块
+    if (mergedPairs.length) animating = true;
     setTimeout(() => {
       for (const [r, c, val, a, b] of mergedPairs) {
         a.el.remove(); b.el.remove();
@@ -391,10 +397,16 @@
         grid[r][c].el = el;
         el.addEventListener('animationend', () => el.classList.remove('merged'), { once: true });
       }
+      animating = false;
       addRandomTile();
       for (const row of grid) for (const t of row) if (t) t.mergedThisTurn = false;
       if (won) showOverlay('你赢了！ 🎉', true);
       else if (!movesAvailable()) showOverlay('游戏结束', false);
+      // 冲刷连按排队的移动
+      if (pending !== null && !over) {
+        const d = pending; pending = null;
+        if (movesAvailable()) move(d);
+      }
     }, 130);
 
     if (!won && !mergedPairs.length && !movesAvailable()) showOverlay('游戏结束', false);
