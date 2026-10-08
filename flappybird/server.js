@@ -28,7 +28,7 @@ http.createServer((req, res) => {
       let data;
       try { data = JSON.parse(body); } catch (e) { res.writeHead(400); res.end("bad json"); return; }
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      const name = "run-" + stamp + "-score" + (data.score | 0) + ".json";
+      const name = "run-" + (data.isAI ? "ai-" : "") + stamp + "-score" + (data.score | 0) + ".json";
       fs.writeFileSync(path.join(REC_DIR, name), JSON.stringify(data, null, 1));
       console.log("saved " + name + "  score=" + (data.score | 0) +
                   "  flaps=" + ((data.flaps || []).length));

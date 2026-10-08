@@ -44,12 +44,29 @@
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
   }
   #aiBtn.on { background: rgba(46, 139, 87, 0.85); }
+  #aiClearBtn, #sndBtn {
+    position: absolute;
+    right: 8px;
+    z-index: 10;
+    font: bold 12px/1.4 "Courier New", monospace;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+    border: 2px solid #fff;
+    border-radius: 8px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  #aiClearBtn { top: 54px; }
+  #sndBtn { top: 84px; }
+  #sndBtn.off { background: rgba(139, 0, 0, 0.75); }
 </style>
 </head>
 <body>
 <div id="stage">
 <canvas id="game"></canvas>
 <button id="aiBtn" type="button">AI 演示: 关</button>
+<button id="aiClearBtn" type="button">清除 AI 最高分</button>
+<button id="sndBtn" type="button">音效: 开</button>
 </div>
 <script>
 "use strict";
@@ -104,7 +121,9 @@ for (const c in IMG_SRC.birds) IMG.birds[c] = {
 };
 const SND = {};
 for (const k in SND_SRC) SND[k] = new Audio(SND_SRC[k]);
+let sndOn = localStorage.getItem("flappy_snd") !== "off";   // 音效开关持久化 (离线快测时务必关)
 function play(name, vol) {
+  if (!sndOn) return;
   const s = SND[name].cloneNode();
   s.volume = vol == null ? 0.55 : vol;
   s.play().catch(() => {});
@@ -143,9 +162,10 @@ resetBird();
 /* ---------- 玩家操作记录 (供 AI 设计): 每次按键瞬间记录局面, 局末上传服务器存文件 ---------- */
 let opRec = null;                     // 本局操作记录 {ts, startFrame, flaps: []}
 
-// 按键瞬间的局面快照: 鸟状态 + 下一根柱子(距离/缺口) + 柱子间距 (速度取按键前一刻)
+// 按键瞬间的局面快照: 鸟状态 + 当前决策对象柱子(距离/缺口) + 柱子间距 (速度取按键前一刻)
+// "当前决策对象"判定与 situation() 一致: 鸟尾未出管口时该管仍是决策对象
 function snapshot() {
-  const ahead = pipes.filter(p => p.x + PIPE_W > BIRD_X + BIRD_W).sort((a, b) => a.x - b.x);
+  const ahead = pipes.filter(p => p.x + PIPE_W > BIRD_X + HIT_INSET_X).sort((a, b) => a.x - b.x);
   const p1 = ahead[0], p2 = ahead[1];
   const gapCenter = p1 ? p1.gapY + PIPE_GAP / 2 : 220;
   return {
@@ -184,7 +204,7 @@ function spawnPipe() {
 }
 
 function flap() {
-  if (opRec && !aiOn) opRec.flaps.push(snapshot());   // 玩家按键瞬间: 记录按键前的局面
+  if (opRec) opRec.flaps.push(snapshot());           // 按键瞬间: 记录按键前的局面 (玩家与 AI 局都记, isAI 区分)
   bird.v = FLAP;
   play("wing");
 }
@@ -220,9 +240,11 @@ function die(cause, hitPipe) {
   }
 }
 
-/* ---------- 局面特征: 鸟相对下一根管道间隙中心的高度差 dy / 速度 v / 管道距离 dx ---------- */
+/* ---------- 局面特征: 鸟相对下一根管道间隙中心的高度差 dy / 速度 v / 管道距离 dx ----------
+   注意: 判定范围含正在穿过的管道 (鸟尾未出管口时该管仍是决策对象),
+   否则 AI 会在管内按"下一根"的缺口做决策, 撞当前管上沿 */
 function situation() {
-  const ahead = pipes.find(p => p.x + PIPE_W > BIRD_X + BIRD_W);
+  const ahead = pipes.find(p => p.x + PIPE_W > BIRD_X + HIT_INSET_X);
   let dy = ahead ? bird.y - (ahead.gapY + PIPE_GAP / 2 - BIRD_H / 2) : bird.y - 220;
   let v = bird.v;
   const dx = ahead ? Math.min(340, ahead.x - BIRD_X) : 340;
@@ -255,29 +277,44 @@ addEventListener("keydown", e => {
 document.addEventListener("visibilitychange", () => { last = null; });
 
 /* ---------- AI 演示 (按钮或 A 键开关): 策略提炼自玩家实玩录制 (recordings/*.json) ----------
-   以下每个参数都来自玩家按键统计, 不是凭空设计:
-   - 巡航: 玩家只在处于下落状态时按键, 按键瞬间速度中位数 +6.5 → v>=6.5 才拍 (间隔自然约 30 帧)
-   - 禁拍区: 玩家从不在鸟中心高于缺口中心 35px 时按键 (录制最小 dy=-34.3) → dy<-35 不拍
-   - 爬升: 玩家低于缺口中心 55px 以上时以 ~13 帧间隔连拍爬升 → dy>55 进入爬升连拍
-   - 节奏: 玩家两次按键最短间隔 10 帧 → 全局冷却 10 帧, 绝不逐帧按键
-   AI 自己玩、自打分 (aiBest 持久化), 死后自动重开循环演示。 */
+   参数来源: 爬升连拍间隔 13 帧 / 最短按键间隔 10 帧 / 补拍位置 dy>=18
+   (单次拍翅固定上升 54px, 判定安全区 |dy|<=41, dy>=18 补拍则波峰 dy≈-36 不顶到上沿)。
+   AI 自己玩、自打分 (aiBest 持久化, 可用"清除 AI 最高分"按钮归零),
+   死后自动重开循环演示; AI 的对局同样上传记录文件 (isAI: true) 供分析优化。 */
 let aiOn = false;
 let aiBest = +(localStorage.getItem("flappy_ai_best") || 0);
 const aiBtn = document.getElementById("aiBtn");
+const aiClearBtn = document.getElementById("aiClearBtn");
 
 function setAI(on) {
   aiOn = on;
   aiBtn.textContent = "AI 演示: " + (on ? "开" : "关");
   aiBtn.classList.toggle("on", on);
+  localStorage.setItem("flappy_ai_on", on ? "1" : "0");   // 开关状态持久化, 刷新后延续
   if (on && state === "over") resetGame();
 }
 aiBtn.addEventListener("click", () => setAI(!aiOn));
+aiClearBtn.addEventListener("click", () => {     // 归零 AI 自打分 (含持久化)
+  aiBest = 0;
+  localStorage.removeItem("flappy_ai_best");
+});
+
+const sndBtn = document.getElementById("sndBtn");
+function setSnd(on) {
+  sndOn = on;
+  sndBtn.textContent = "音效: " + (on ? "开" : "关");
+  sndBtn.classList.toggle("off", !on);
+  localStorage.setItem("flappy_snd", on ? "on" : "off");
+}
+sndBtn.addEventListener("click", () => setSnd(!sndOn));
+if (!sndOn) { sndBtn.textContent = "音效: 关"; sndBtn.classList.add("off"); }
 
 let aiLastFlap = -99;                    // 上次 AI 拍翅帧号 (强制间隔, 模仿人类点击节奏)
 
 function startAIPlay() {
   state = "play";
   aiLastFlap = frame;
+  opRec = { ts: new Date().toISOString(), startFrame: frame, flaps: [], isAI: true };
   pipes = [];
   spawnPipe();
   pipes[0].x = W + 40;
@@ -285,21 +322,18 @@ function startAIPlay() {
   play("swoosh", 0.4);
 }
 
-// 玩家录制提炼出的操作策略: 爬升连拍 / 近管安全补拍 / 远端高度维持
-// 关键几何: 单次拍翅固定上升 54px, 判定安全区 |dy|<=41 → 管内只有 dy>=15 时拍翅才不会顶到上沿
+// 玩家录制提炼出的操作策略: 爬升连拍 / 中线以下安全补拍
+// 关键几何: 单次拍翅固定上升 54px, 判定安全区 |dy|<=41 → 只有 dy>=18 时补拍, 上升后仍不顶到上沿
+// (旧版"远端高度维持"会在管道逼近时高位补拍, 上升 54px 撞缺口上沿 — 录制诊断 13/14 死因, 已删)
 function policyFlap() {
   const s = situation();
-  const dy = s[0], v = s[1], dx = s[2];
+  const dy = s[0], v = s[1];
   const since = frame - aiLastFlap;
   if (dy > 55) {                                  // 明显低于缺口中心: 玩家式连拍爬升 (间隔 13 帧)
     if (since >= 13) { flap(); aiLastFlap = frame; }
     return;
   }
-  if (dx > 130) {                                 // 远端: 维持高度 (v>=7 时净位移为零, 高度稳定)
-    if (dy > -35 && v >= 7 && since >= 10) { flap(); aiLastFlap = frame; }
-    return;
-  }
-  if (dy >= 15 && v > 0 && since >= 10) {         // 接近/穿过管道: 只在足够低处补拍, 上升 54px 仍安全
+  if (dy >= 18 && v > 0 && since >= 10) {         // 缺口中线以下且在下落: 补拍, 波峰 dy≈-36 安全
     flap();
     aiLastFlap = frame;
   }
@@ -343,6 +377,10 @@ function update() {
       if (!p.scored && p.x + PIPE_W < BIRD_X) {
         p.scored = true; score++;
         play("point"); play("swoosh", 0.3);
+        if (aiOn && score > aiBest) {          // 自打分实时刷新 (AI 可能长期不死, 不能只在死亡时更新)
+          aiBest = score;
+          localStorage.setItem("flappy_ai_best", aiBest);
+        }
         pipesSinceSwitch++;
         if (pipesSinceSwitch >= 4) { pipesSinceSwitch = 0; night = !night; }
       }
@@ -501,6 +539,9 @@ function draw() {
     ctx.fillRect(0, 0, W, H);
   }
 }
+
+/* ---------- 恢复持久化的 AI 开关 ---------- */
+if (localStorage.getItem("flappy_ai_on") === "1") setAI(true);
 
 /* ---------- 主循环: 固定 60fps 步进 ---------- */
 let last = null, acc = 0;
