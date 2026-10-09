@@ -80,6 +80,10 @@ const IMG_SRC = {
   pipe_red:  "@@img_pipe_red@@",
   msg:       "@@img_message@@",
   gameover:  "@@img_gameover@@",
+  medal_platinum: "@@img_medal_platinum@@",
+  medal_gold:     "@@img_medal_gold@@",
+  medal_silver:   "@@img_medal_silver@@",
+  medal_bronze:   "@@img_medal_bronze@@",
   digits: {
     0:"@@img_0@@",1:"@@img_1@@",2:"@@img_2@@",3:"@@img_3@@",4:"@@img_4@@",
     5:"@@img_5@@",6:"@@img_6@@",7:"@@img_7@@",8:"@@img_8@@",9:"@@img_9@@"
@@ -113,6 +117,8 @@ const IMG = {
   bg_day: loadImg(IMG_SRC.bg_day), bg_night: loadImg(IMG_SRC.bg_night),
   base: loadImg(IMG_SRC.base), pipe: loadImg(IMG_SRC.pipe), pipe_red: loadImg(IMG_SRC.pipe_red),
   msg: loadImg(IMG_SRC.msg), gameover: loadImg(IMG_SRC.gameover),
+  medal_platinum: loadImg(IMG_SRC.medal_platinum), medal_gold: loadImg(IMG_SRC.medal_gold),
+  medal_silver: loadImg(IMG_SRC.medal_silver), medal_bronze: loadImg(IMG_SRC.medal_bronze),
   digits: {}, birds: {}
 };
 for (const d in IMG_SRC.digits) IMG.digits[d] = loadImg(IMG_SRC.digits[d]);
@@ -145,6 +151,7 @@ addEventListener("resize", fit); fit();
 let state = "ready";          // ready | play | dying | over
 let frame = 0, score = 0, pipes = [], groundX = 0;
 let night = false, pipesSinceSwitch = 0, flash = 0, overAt = 0;
+let bgMix = 0;                        // 背景渐变系数: 0=白天 1=夜晚, 每帧向目标缓动 (~0.8s 过渡)
 let best = +(localStorage.getItem("flappy_best") || 0);
 let birdColor = localStorage.getItem("flappy_color") || "yellow";
 if (!IMG.birds[birdColor]) birdColor = "yellow";
@@ -349,6 +356,8 @@ function aiStep() {
 function update() {
   frame++;
   if (flash > 0) flash = Math.max(0, flash - 0.08);
+  bgMix += (night ? 1 : -1) * 0.025;              // 昼夜背景渐变过渡
+  bgMix = Math.max(0, Math.min(1, bgMix));
   if (aiOn) aiStep();
 
   if (state === "ready") {
@@ -447,17 +456,22 @@ function outlinedText(txt, x, y, size, align) {
   ctx.fillStyle = "#ffffff";
   ctx.fillText(txt, x, y);
 }
-function medalColor(s) {
-  if (s >= 40) return ["#c0c0c0", "#f5f5f5", "#8a8a8a"]; // 白金
-  if (s >= 30) return ["#e8c14a", "#fff3b0", "#a8842a"]; // 金
-  if (s >= 20) return ["#c9d4dd", "#f2f6f9", "#8b98a5"]; // 银
-  if (s >= 10) return ["#cd7f32", "#eab37a", "#8f5520"]; // 铜
+function medalFor(s) {
+  if (s >= 40) return IMG.medal_platinum;
+  if (s >= 30) return IMG.medal_gold;
+  if (s >= 20) return IMG.medal_silver;
+  if (s >= 10) return IMG.medal_bronze;
   return null;
 }
 
 function draw() {
-  // 背景
-  ctx.drawImage(night ? IMG.bg_night : IMG.bg_day, 0, 0);
+  // 背景: 白天为底, 夜晚按 bgMix 叠加淡入淡出 (渐变过渡, 不突变)
+  ctx.drawImage(IMG.bg_day, 0, 0);
+  if (bgMix > 0) {
+    ctx.globalAlpha = bgMix;
+    ctx.drawImage(IMG.bg_night, 0, 0);
+    ctx.globalAlpha = 1;
+  }
 
   // 管道
   for (const p of pipes) {
@@ -513,19 +527,13 @@ function draw() {
     outlinedText("BEST", px + pw - 16, py + 86, 14, "right");
     drawDigitsRight(String(best), px + pw - 16, py + 94, 0.72);
 
-    const mc = medalColor(score);
-    const mx = px + 46, my = py + 74, mr = 26;
-    if (mc) {
-      const g = ctx.createRadialGradient(mx - 8, my - 8, 4, mx, my, mr);
-      g.addColorStop(0, mc[1]); g.addColorStop(0.55, mc[0]); g.addColorStop(1, mc[2]);
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(mx, my, mr, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = mc[2]; ctx.lineWidth = 2; ctx.stroke();
-      ctx.fillStyle = "rgba(255,255,255,0.55)";
-      ctx.beginPath(); ctx.arc(mx - 9, my - 9, 6, 0, Math.PI * 2); ctx.fill();
+    const medal = medalFor(score);
+    const mx = px + 46, my = py + 74, ms = 44;                   // 22px 贴图放大 2 倍, 同原版面板比例
+    if (medal) {
+      ctx.drawImage(medal, mx - ms / 2, my - ms / 2, ms, ms);
     } else {
-      ctx.fillStyle = "#b9b9a2";
-      ctx.beginPath(); ctx.arc(mx, my, mr, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#b9b9a2";                                 // 无奖牌: 占位灰圆
+      ctx.beginPath(); ctx.arc(mx, my, ms / 2, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = "#8f8f7a"; ctx.lineWidth = 2; ctx.stroke();
     }
 

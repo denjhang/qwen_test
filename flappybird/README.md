@@ -55,14 +55,16 @@ AI 的对局同样上传记录文件（文件名含 `ai-`，内容含 `isAI: tru
 | `build.js` | 构建脚本：`node build.js` 把 `assets/` 内嵌生成 `flappy.html` |
 | `server.js` | 本地服务器：静态服务 + `POST /record` 存 `recordings/` |
 | `recordings/` | 玩家操作记录 JSON（本地数据，不入库） |
-| `assets/` | 原版素材：26 张贴图 + 5 个 ogg 音效 + LICENSE |
+| `assets/` | 原版素材：30 张贴图（含 4 枚奖牌）+ 5 个 ogg 音效 + LICENSE |
 
 ## 玩法参数（原版手感）
 
 重力 0.45、拍翅 -7、终端速度 10、管道速度 2px/帧、间隙 100px、间距 170px；
-撞击判定框内缩 (4,3) 同原版宽容度；每过 4 分管道切换昼夜；
-撞击白闪 + 坠落动画；结算面板含 SCORE/BEST 与奖牌（10/20/30/40 分对应铜/银/金/白金）。
+撞击判定框内缩 (4,3) 同原版宽容度；每过 4 分管道切换昼夜，背景以 ~0.8s 渐变过渡（bgMix 缓动叠加）；
+撞击白闪 + 坠落动画；结算面板含 SCORE/BEST 与原版奖牌贴图（10/20/30/40 分对应铜/银/金/白金，不足 10 分显示占位灰圆）。
 
 ## 素材来源
 
 [samuelcust/flappy-bird-assets](https://github.com/samuelcust/flappy-bird-assets)（原版素材，见 `assets/LICENSE`）。
+4 枚奖牌贴图从原版 v1.2 完整精灵图集裁出（经 [miguelpaday/FlappyBirdClone](https://github.com/miguelpaday/FlappyBirdClone) 存档的
+`Mobile_-_Flappy_Bird_-_Version_12_Sprites.png`，同为原版游戏素材）。
