@@ -304,6 +304,7 @@ aiBtn.addEventListener("click", () => setAI(!aiOn));
 aiClearBtn.addEventListener("click", () => {     // 归零 AI 自打分 (含持久化)
   aiBest = 0;
   localStorage.removeItem("flappy_ai_best");
+  if (aiOn) resetGame();   // 演示进行中必须同时重开一局: 否则进行中的当前分下一根管道就把最高分写回去
 });
 
 const sndBtn = document.getElementById("sndBtn");
